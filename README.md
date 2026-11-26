@@ -77,7 +77,8 @@ support** button copies the log together with device and settings info.
 
 ## Install
 
-1. Download `CTS-Mapper.apk` from the Releases page (right side of this page).
+1. [Download CTS-Mapper.apk](https://github.com/yonechan09-hub/CtsMapper/releases/latest/download/CTS-Mapper.apk)
+   (also available on the Releases page, right side of this page).
 2. Install it and open the app.
 3. Turn on the accessibility service first from Android's own settings
    (Settings > Accessibility > CTS Mapper), not from the switch inside the app.
