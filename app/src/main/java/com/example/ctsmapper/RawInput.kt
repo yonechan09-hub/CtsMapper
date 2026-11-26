@@ -119,7 +119,7 @@ object RawInput {
         appCtx?.let { AppLog.add(it, if (err) "ERR" else "SYS", "shizuku: $s") }
     }
 
-    private val callback = object : IKeyCallback.Stub() {
+    private val callback: IKeyCallback.Stub = object : IKeyCallback.Stub() {
         override fun onEvent(path: String, name: String, type: Int, code: Int, value: Int) {
             main.post { handle(name, type, code, value) }
         }
@@ -129,7 +129,7 @@ object RawInput {
         }
     }
 
-    private val conn = object : ServiceConnection {
+    private val conn: ServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(n: ComponentName, b: IBinder) {
             binding = false
             main.removeCallbacks(bindTimeoutRun)
@@ -151,9 +151,9 @@ object RawInput {
             }
         }
 
-        override fun onBindingDied(n: ComponentName) = bindingLost("binding died")
+        override fun onBindingDied(n: ComponentName) { bindingLost("binding died") }
 
-        override fun onNullBinding(n: ComponentName) = bindingLost("null binding")
+        override fun onNullBinding(n: ComponentName) { bindingLost("null binding") }
 
         override fun onServiceDisconnected(n: ComponentName) {
             main.removeCallbacks(bindTimeoutRun)
@@ -166,7 +166,7 @@ object RawInput {
         }
     }
 
-    private fun bindingLost(what: String) {
+    private fun bindingLost(what: String): Unit {
         main.removeCallbacks(bindTimeoutRun)
         val c = appCtx ?: return
         svc = null; binding = false; running = false
