@@ -108,7 +108,7 @@ class EventService() : IUserService.Stub() {
             } catch (_: Throwable) { /* node not readable */ }
         }
         if (opened.isEmpty()) return
-        val pipe = try { Os.pipe2(OsConstants.O_CLOEXEC) } catch (_: Throwable) { opened.forEach { closeFd(it.first) }; return }
+        val pipe = try { Os.pipe() } catch (_: Throwable) { opened.forEach { closeFd(it.first) }; return }
         val s = Session(pipe[0], pipe[1], opened.size)
         session = s
         opened.forEach { (fd, path, name) ->
