@@ -36,12 +36,18 @@ right away.
   optional status notification.
 - A master switch turns everything off at once.
 
+## Quick Settings tile
+
+Add the **CTS Mapper** tile to your Quick Settings panel to switch the
+accessibility service on or off with one tap. This is useful for apps that
+refuse to run while an accessibility service is on. It only acts when you tap
+it, never on its own. The tile needs `WRITE_SECURE_SETTINGS`, which you grant
+once from the Setup tab with Shizuku.
+
 ## Keeping it running
 
 - **Auto-recover:** if the accessibility service shows "Not working" or gets
   killed, the app switches it off and on again to bring it back.
-- **Quick Settings tile** to switch the accessibility service on or off in one
-  tap, for apps that don't run while an accessibility service is on.
 - **Setup guide** with the ColorOS steps: battery set to Unrestricted,
   Auto-launch, lock in recents, and the Google and Gemini apps.
 
