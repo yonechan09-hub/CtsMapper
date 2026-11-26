@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">CTS Mapper</string>
+    <string name="svc_label">CTS Mapper triggers</string>
+    <string name="svc_desc">Detects volume-key long/double presses and a long press on an invisible bottom-edge strip, then runs the action you assigned. It does not read screen content.</string>
+</resources>
