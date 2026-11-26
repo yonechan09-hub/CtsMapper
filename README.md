@@ -43,3 +43,57 @@ accessibility service on or off with one tap. This is useful for apps that
 refuse to run while an accessibility service is on. It only acts when you tap
 it, never on its own. The tile needs `WRITE_SECURE_SETTINGS`, which you grant
 once from the Setup tab with Shizuku.
+
+## Keeping it running
+
+- **Auto-recover:** if the accessibility service shows "Not working" or gets
+  killed, the app switches it off and on again to bring it back.
+- **Setup guide** with optional ColorOS steps that help stop the system from
+  killing or freezing the app: battery set to Unrestricted, Auto-launch, lock
+  in recents, and the Google and Gemini apps. You may not need all of them. Try
+  the app first and only apply the ones that fix problems on your phone.
+
+## Shortcuts for other apps
+
+Run an action from Tasker, a launcher shortcut, or ColorOS' own key settings:
+
+    ctsmapper://run/CTS
+    ctsmapper://run/GEMINI_OVERLAY
+    ctsmapper://run/GEMINI_ASSIST
+    ctsmapper://run/GEMINI_APP
+
+## Log and diagnostics
+
+An in-app log shows the last events (triggers, actions, errors). A **Copy for
+support** button copies the log together with device and settings info.
+
+## Requirements
+
+- Android 11 or newer
+- Accessibility service turned on for CTS Mapper
+- Google set as the default assistant (needed for Circle to Search)
+- [Shizuku](https://shizuku.rikka.app/) running, only for the Plus Key listener
+  and for granting permissions once
+
+## Install
+
+1. Download `CTS-Mapper.apk` from the Releases page (right side of this page).
+2. Install it and open the app.
+3. Turn on the accessibility service first from Android's own settings
+   (Settings > Accessibility > CTS Mapper), not from the switch inside the app.
+   The in-app switch can sometimes hang.
+4. Follow the rest of the **Setup** tab.
+
+For the Plus Key: turn on the Shizuku listener, tap **Record trigger**, press
+the key, then pick actions for it. The app only observes the key, so ColorOS'
+own Plus Key action still fires unless you set it to nothing in system settings.
+
+## Known issues
+
+- The accessibility switch inside the app can sometimes hang. If that happens,
+  turn the service on or off from Android's Accessibility settings instead.
+
+## License
+
+All rights reserved. See the LICENSE file.
+Third-party notices: see THIRD_PARTY_NOTICES.md.
