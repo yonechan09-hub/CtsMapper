@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,7 +59,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun Root() {
-    var screen by remember { mutableStateOf("main") }
+    var screen by rememberSaveable { mutableStateOf("main") }
     BackHandler(enabled = screen != "main") { screen = "main" }
     val topLevel = screen == "main" || screen == "log" || screen == "guide"
     Column(Modifier.fillMaxSize().background(Ct.Bg)) {
@@ -86,6 +88,26 @@ fun rememberResumeTick(): Int {
     return tick
 }
 
+/** Accessibility-service-enabled state that updates live: ContentObserver on the setting + refresh on resume. */
+@Composable
+fun rememberA11yEnabled(): Boolean {
+    val ctx = LocalContext.current
+    val tick = rememberResumeTick()
+    var on by remember { mutableStateOf(Engine.a11yEnabled(ctx)) }
+    LaunchedEffect(tick) { on = Engine.a11yEnabled(ctx) }
+    DisposableEffect(Unit) {
+        val obs = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) { on = Engine.a11yEnabled(ctx) }
+        }
+        val cr = ctx.contentResolver
+        cr.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), false, obs)
+        cr.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_ENABLED), false, obs)
+        on = Engine.a11yEnabled(ctx)
+        onDispose { cr.unregisterContentObserver(obs) }
+    }
+    return on
+}
+
 fun openSettings(ctx: Context, i: Intent) {
     try {
         ctx.startActivity(i)
@@ -110,7 +132,7 @@ fun MainScreen(go: (String) -> Unit) {
     val ctx = LocalContext.current
     val act = ctx as ComponentActivity
     val tick = rememberResumeTick()
-    val a11y = remember(tick) { Engine.a11yEnabled(ctx) }
+    val a11y = rememberA11yEnabled()
     val assistant = remember(tick) { Settings.Secure.getString(ctx.contentResolver, "assistant") ?: "(none)" }
     val googleIsAssistant = assistant.startsWith(Actions.GOOGLE)
 
@@ -285,7 +307,8 @@ fun EdgeCard() {
 fun ReliabilityCard() {
     val ctx = LocalContext.current
     val tick = rememberResumeTick()
-    val canWrite = remember(tick) { A11yGuard.canWrite(ctx) }
+    val grantVer = A11yGuard.grantVersion
+    val canWrite = remember(tick, grantVer) { A11yGuard.canWrite(ctx) }
     val batt = remember(tick) { ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName) }
     var keep by remember { mutableStateOf(Prefs.keepAlive(ctx)) }
     CtCard {

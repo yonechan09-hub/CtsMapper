@@ -10,9 +10,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Last 50 events, persisted in its own prefs file (NOT "cfg", so writes never re-trigger config listeners). */
+/** Last 150 events, persisted in its own prefs file (NOT "cfg", so writes never re-trigger config listeners). */
 object AppLog {
-    private const val MAX = 50
+    private const val MAX = 150
     private val lock = Any()
     private val items = ArrayList<String>()
     private var loaded = false
@@ -69,4 +69,10 @@ object AppLog {
             old?.uncaughtException(t, e)
         }
     }
+}
+
+/** "ExceptionClass: message @ File.kt:12 | File.kt:34 | ..." - what the Log screen shows for a caught exception. */
+internal fun describeError(e: Throwable): String {
+    val top = e.stackTrace.take(3).joinToString(" | ") { "${it.fileName}:${it.lineNumber}" }
+    return "${e.javaClass.name}: ${e.message} @ $top"
 }

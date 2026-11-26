@@ -3,6 +3,7 @@ package com.example.ctsmapper
 import android.content.ComponentName
 import android.content.Context
 import android.os.IBinder
+import android.os.RemoteException
 import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
@@ -14,14 +15,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Runs in a separate process with shell (adb) privileges, started by Shizuku as a DAEMON, so it keeps
  * working after the app process is swiped away / killed.
  *
- * 1. Optional: reads only the recorded /dev/input/event* device (or only EV_KEY devices while recording) for the
- *    Plus Key. Never touchscreen or sensor nodes. Readers block in poll() on the device and a stop pipe.
+ * 1. Optional: reads /dev/input/event* for the Plus Key: every readable node while recording, otherwise the recorded
+ *    device (all nodes if it is not found). One thread blocks in poll() on the nodes plus a stop pipe.
  * 2. Optional recovery watcher (event driven, reads the system event log stream, no polling): if the app's
  *    own process has died while the accessibility service is still enabled ("Not working"), toggle it off
  *    and back on so Android rebinds it.
@@ -43,12 +43,17 @@ class EventService() : IUserService.Stub() {
         stopSession()
     }
 
-    /** One start(): a stop pipe shared by its reader threads. Closing the write end wakes every poll(). */
-    private class Session(val stopRd: FileDescriptor, private val stopWr: FileDescriptor, count: Int) {
-        private val users = AtomicInteger(count)
+    init {
+        // Nothing in this process may take the whole service down: report the exception instead.
+        Thread.setDefaultUncaughtExceptionHandler { t, e -> info("ERR uncaught in ${t.name}: ${describeError(e)}") }
+    }
+
+    private class Dev(val fd: FileDescriptor, val path: String, val name: String)
+
+    /** One start(): the opened devices plus a stop pipe. Closing the write end wakes the reader's poll(). */
+    private class Session(val devs: List<Dev>, val stopRd: FileDescriptor, private val stopWr: FileDescriptor) {
         private val wrClosed = AtomicBoolean(false)
         fun stop() { if (wrClosed.compareAndSet(false, true)) closeFd(stopWr) }
-        fun release() { if (users.decrementAndGet() == 0) { stop(); closeFd(stopRd) } }
     }
 
     private val lock = Any()
@@ -91,88 +96,183 @@ class EventService() : IUserService.Stub() {
     // ------------------------------------------------------------------ evdev (Plus Key)
     @Synchronized
     override fun start(cb: IKeyCallback, evdev: Boolean, device: String) {
-        this.cb = cb
-        val g = ++gen
-        stopSession()
-        linkDeath(cb)
-        if (!evdev || g != gen) return
-
-        val opened = ArrayList<Triple<FileDescriptor, String, String>>() // fd, path, name
-        File("/dev/input").listFiles { f -> f.name.startsWith("event") }?.sortedBy { it.name }?.forEach { f ->
-            val name = runCatching { File("/sys/class/input/${f.name}/device/name").readText().trim() }
-                .getOrDefault(f.name)
-            val ok = if (device.isEmpty()) isKeyDevice(f.name, name) else name == device
-            if (!ok) return@forEach
-            try {
-                opened.add(Triple(Os.open(f.path, OsConstants.O_RDONLY or OsConstants.O_NONBLOCK or OsConstants.O_CLOEXEC, 0), f.path, name))
-            } catch (_: Throwable) { /* node not readable */ }
-        }
-        if (opened.isEmpty()) return
-        val pipe = try { Os.pipe() } catch (_: Throwable) { opened.forEach { closeFd(it.first) }; return }
-        val s = Session(pipe[0], pipe[1], opened.size)
-        session = s
-        opened.forEach { (fd, path, name) ->
-            Thread { readLoop(fd, path, name, cb, g, s) }.apply { isDaemon = true }.start()
-        }
-    }
-
-    /** Only keyboard-like nodes: has EV_KEY and neither EV_ABS (touchscreen, many sensors) nor EV_REL. */
-    private fun isKeyDevice(node: String, name: String): Boolean {
-        val ev = runCatching {
-            File("/sys/class/input/$node/device/capabilities/ev").readText().trim().split(' ').last().toLong(16)
-        }.getOrNull() ?: return false
-        val key = ev and (1L shl 1) != 0L
-        val rel = ev and (1L shl 2) != 0L
-        val abs = ev and (1L shl 3) != 0L
-        return key && !rel && !abs && !name.contains("touch", true) && !name.contains("sensor", true)
-    }
-
-    private fun readLoop(fd: FileDescriptor, path: String, name: String, cb: IKeyCallback, g: Int, s: Session) {
-        val size = if (android.os.Process.is64Bit()) 24 else 16 // struct input_event
-        val off = size - 8                                       // type(2) code(2) value(4)
-        val buf = ByteArray(size * 16)
-        val bb = ByteBuffer.wrap(buf).order(ByteOrder.nativeOrder())
-        val fds = arrayOf(
-            StructPollfd().apply { this.fd = fd; events = OsConstants.POLLIN.toShort() },
-            StructPollfd().apply { this.fd = s.stopRd; events = OsConstants.POLLIN.toShort() }
-        )
         try {
-            while (g == gen) {
-                fds[0].revents = 0; fds[1].revents = 0
+            this.cb = cb
+            val g = ++gen
+            stopSession()
+            linkDeath(cb)
+            if (!evdev || g != gen) return
+            openAndRead(cb, g, device)
+        } catch (t: Throwable) {
+            // Never let anything escape into the binder thread: that would kill this process.
+            info("ERR start(): ${describeError(t)}")
+        }
+    }
+
+    /** device == "": open every readable event node. Otherwise the node(s) with that name, else every node. */
+    private fun openAndRead(cb: IKeyCallback, g: Int, device: String) {
+        val nodes = (File("/dev/input").listFiles { f -> f.name.startsWith("event") } ?: emptyArray<File>())
+            .sortedBy { it.name.removePrefix("event").toIntOrNull() ?: Int.MAX_VALUE }
+        if (nodes.isEmpty()) { info("ERR no /dev/input/event* nodes visible"); return }
+        val names = deviceNames()
+        val labelled = nodes.map { f ->
+            val n = names[f.name]
+                ?: runCatching { File("/sys/class/input/${f.name}/device/name").readText().trim() }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: f.name
+            f to n
+        }
+
+        val opened = ArrayList<Dev>()
+        val failed = ArrayList<String>()
+        fun openAll(list: List<Pair<File, String>>) {
+            for ((f, n) in list) {
                 try {
-                    Os.poll(fds, -1)
-                } catch (e: ErrnoException) {
-                    if (e.errno == OsConstants.EINTR) continue
-                    return
-                }
-                if (fds[1].revents.toInt() != 0) return // stop pipe closed / written
-                val bad = OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL
-                if (fds[0].revents.toInt() and bad != 0) return
-                if (fds[0].revents.toInt() and OsConstants.POLLIN == 0) continue
-                val n = try {
-                    Os.read(fd, buf, 0, buf.size)
-                } catch (e: ErrnoException) {
-                    if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) continue
-                    return
-                }
-                if (n <= 0) return
-                var p = 0
-                while (p + size <= n) {
-                    val type = bb.getShort(p + off).toInt() and 0xFFFF
-                    val code = bb.getShort(p + off + 2).toInt() and 0xFFFF
-                    val value = bb.getInt(p + off + 4)
-                    p += size
-                    val isKey = type == 1 && code !in 320..335 // skip touch (BTN_TOUCH etc.)
-                    val isSwitch = type == 5
-                    if ((isKey || isSwitch) && (value == 0 || value == 1) && g == gen) {
-                        cb.onEvent(path, name, type, code, value)
-                    }
+                    val fd = Os.open(f.path, OsConstants.O_RDONLY or OsConstants.O_NONBLOCK or OsConstants.O_CLOEXEC, 0)
+                    opened.add(Dev(fd, f.path, n))
+                } catch (t: Throwable) {
+                    failed.add("${f.name}: ${t.javaClass.simpleName} ${t.message}") // one bad node never stops the rest
                 }
             }
-        } catch (_: Throwable) { /* app gone or callback dead */ }
-        finally {
-            closeFd(fd)
-            s.release()
+        }
+        val mode: String
+        if (device.isEmpty()) {
+            mode = "all"
+            openAll(labelled)
+        } else {
+            mode = "recorded"
+            openAll(labelled.filter { it.second == device || it.first.name == device })
+            if (opened.isEmpty()) {
+                info("recorded device '$device' not found or not readable: opening all devices")
+                openAll(labelled)
+            }
+        }
+        if (failed.isNotEmpty()) infoChunks("open failed", failed.joinToString("; "))
+        infoChunks("opened ${opened.size}/${nodes.size} ($mode)", opened.joinToString(", ") { "${File(it.path).name}=${it.name}" })
+        if (opened.isEmpty() || g != gen) { opened.forEach { closeFd(it.fd) }; return }
+
+        val pipe = try { Os.pipe() } catch (t: Throwable) {
+            info("ERR pipe(): ${describeError(t)}")
+            opened.forEach { closeFd(it.fd) }
+            return
+        }
+        val s = Session(opened, pipe[0], pipe[1])
+        session = s
+        try {
+            Thread { readLoop(s, g, cb) }.apply { isDaemon = true; name = "evdev-reader" }.start()
+        } catch (t: Throwable) {
+            info("ERR reader thread: ${describeError(t)}")
+            session = null
+            s.stop(); closeFd(s.stopRd)
+            opened.forEach { closeFd(it.fd) }
+        }
+    }
+
+    /** node -> device name, from /proc/bus/input/devices (best effort; callers fall back to sysfs / node name). */
+    private fun deviceNames(): Map<String, String> {
+        val m = HashMap<String, String>()
+        runCatching {
+            var name: String? = null
+            File("/proc/bus/input/devices").forEachLine { l ->
+                when {
+                    l.startsWith("N: Name=") -> name = l.substringAfter("Name=").trim().removeSurrounding("\"")
+                    l.startsWith("H: Handlers=") -> {
+                        val n = name
+                        if (n != null) Regex("event\\d+").findAll(l).forEach { m[it.value] = n }
+                    }
+                    l.isBlank() -> name = null
+                    else -> Unit
+                }
+            }
+        }
+        return m
+    }
+
+    private fun infoChunks(head: String, body: String) {
+        if (body.isEmpty()) { info(head); return }
+        var i = 0
+        var first = true
+        while (i < body.length) {
+            val part = body.substring(i, minOf(body.length, i + 200))
+            info(if (first) "$head: $part" else "  ...$part")
+            first = false
+            i += 200
+        }
+    }
+
+    /** One thread polls every opened node plus the stop pipe. A node that fails is dropped, the rest keep going. */
+    private fun readLoop(s: Session, g: Int, cb: IKeyCallback) {
+        val live = ArrayList(s.devs)
+        val size = if (android.os.Process.is64Bit()) 24 else 16 // struct input_event
+        val off = size - 8                                       // type(2) code(2) value(4)
+        val buf = ByteArray(size * 32)
+        val bb = ByteBuffer.wrap(buf).order(ByteOrder.nativeOrder())
+        fun pollSet(): Array<StructPollfd> {
+            val a = ArrayList<StructPollfd>(live.size + 1)
+            a.add(pollfd(s.stopRd))
+            live.forEach { a.add(pollfd(it.fd)) }
+            return a.toTypedArray()
+        }
+        var pf = pollSet()
+        try {
+            while (g == gen && live.isNotEmpty()) {
+                pf.forEach { it.revents = 0 }
+                try {
+                    Os.poll(pf, -1)
+                } catch (e: ErrnoException) {
+                    if (e.errno == OsConstants.EINTR) continue
+                    info("ERR poll(): ${describeError(e)}")
+                    return
+                }
+                if (pf[0].revents.toInt() != 0) return // stop pipe closed
+                val dead = ArrayList<Dev>()
+                for (i in live.indices) {
+                    val d = live[i]
+                    val rev = pf[i + 1].revents.toInt()
+                    if (rev == 0) continue
+                    if (rev and OsConstants.POLLIN != 0) {
+                        val n = try {
+                            Os.read(d.fd, buf, 0, buf.size)
+                        } catch (e: ErrnoException) {
+                            if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) continue
+                            info("ERR read ${File(d.path).name}: ${describeError(e)}")
+                            dead.add(d)
+                            continue
+                        }
+                        if (n <= 0) { dead.add(d); continue }
+                        var p = 0
+                        while (p + size <= n) {
+                            val type = bb.getShort(p + off).toInt() and 0xFFFF
+                            val code = bb.getShort(p + off + 2).toInt() and 0xFFFF
+                            val value = bb.getInt(p + off + 4)
+                            p += size
+                            val isKey = type == 1 && code !in 320..335 // skip touch (BTN_TOUCH etc.)
+                            val isSwitch = type == 5
+                            if ((isKey || isSwitch) && (value == 0 || value == 1) && g == gen) {
+                                try {
+                                    cb.onEvent(d.path, d.name, type, code, value)
+                                } catch (e: Throwable) {
+                                    if (e is RemoteException) return // app is gone
+                                    info("ERR onEvent: ${describeError(e)}")
+                                }
+                            }
+                        }
+                    } else if (rev and (OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL) != 0) {
+                        info("device closed: ${File(d.path).name} (revents=$rev)")
+                        dead.add(d)
+                    }
+                }
+                if (dead.isNotEmpty()) {
+                    dead.forEach { closeFd(it.fd) }
+                    live.removeAll(dead.toSet())
+                    pf = pollSet()
+                }
+            }
+        } catch (t: Throwable) {
+            info("ERR reader: ${describeError(t)}")
+        } finally {
+            live.forEach { closeFd(it.fd) }
+            s.stop()
+            closeFd(s.stopRd)
         }
     }
 
@@ -282,7 +382,8 @@ class EventService() : IUserService.Stub() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastCheck < 20_000) return // throttle: at most one process check per 20 s
         lastCheck = now
-        if (sh("pidof", appPkg).first == 0) return // process alive
+        val pid = sh("pidof", appPkg).first
+        if (pid != 1) return // 0 = alive; anything else (pidof missing / failed to run) = unknown, never toggle on a guess
         val list = readList()
         if (list.none { same(it, t) }) return // service not enabled: nothing to recover
         sh("sh", "-c", listScript(list.filterNot { same(it, t) }))
@@ -305,3 +406,10 @@ class EventService() : IUserService.Stub() {
 }
 
 private fun closeFd(fd: FileDescriptor) { try { Os.close(fd) } catch (_: Throwable) { } }
+
+private fun pollfd(f: FileDescriptor): StructPollfd {
+    val p = StructPollfd()
+    p.fd = f
+    p.events = OsConstants.POLLIN.toShort()
+    return p
+}

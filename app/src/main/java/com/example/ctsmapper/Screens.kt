@@ -109,7 +109,7 @@ fun GuideScreen() {
     val battOk = remember(tick) {
         ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     }
-    val a11y = remember(tick) { Engine.a11yEnabled(ctx) }
+    val a11y = rememberA11yEnabled()
     val notifOk = remember(tick) { ctx.getSystemService(NotificationManager::class.java).areNotificationsEnabled() }
 
     // Manual ticks live in Prefs; mTick just makes this screen re-read them after a tap.
@@ -120,7 +120,8 @@ fun GuideScreen() {
     val googleManual = remember(mTick) { Prefs.guideDone(ctx, "google") }
     fun toggle(id: String, now: Boolean) { Prefs.setGuideDone(ctx, id, !now); mTick++ }
 
-    val canWrite = A11yGuard.canWrite(ctx)
+    val grantVer = A11yGuard.grantVersion
+    val canWrite = remember(tick, grantVer) { A11yGuard.canWrite(ctx) }
     val doneCount = listOf(a11y, canWrite, battOk, autoManual, lockManual, googleManual, notifOk).count { it }
     val total = 7
 
@@ -235,6 +236,8 @@ private fun parseLog(line: String): LogEntry {
         kind == "ERR" -> LogTag("Error", Ct.Danger, Ct.DangerDim)
         kind == "CRSH" -> LogTag("Crash", Ct.Danger, Ct.DangerDim)
         kind == "SYS" -> LogTag("System", Ct.Ink2, Ct.Raised)
+        kind == "KEY" -> LogTag("Key", Ct.Teal, Ct.TealDim)
+        kind == "HELP" -> LogTag("Helper", Ct.Peri, Ct.PeriDim)
         else -> LogTag(kind, Ct.Ink2, Ct.Raised)
     }
     return LogEntry(time, tag, msg)
@@ -253,7 +256,7 @@ fun LogScreen() {
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                ScreenTitle("Log", "Last ${lines.size} of 50 events, newest first")
+                ScreenTitle("Log", "Last ${lines.size} of 150 events, newest first")
             }
             Spacer(Modifier.width(12.dp))
             CtButton("Copy for support", {

@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -31,13 +32,34 @@ object RawInput {
     @Volatile private var grantUntil = 0L
     private var screenRx: BroadcastReceiver? = null
 
+    // ---- automatic reconnect with backoff (1s, 2s, 4s ... 60s) while the helper is wanted
+    private var wantUp = false
+    private var reconnectAttempt = 0
+    private var reconnectPending = false
+    private var connectedAt = 0L
+    private val reconnectRun = Runnable {
+        reconnectPending = false
+        val c = appCtx ?: return@Runnable
+        if (wantUp && (Engine.shellWanted(c) || recording) && !running && !binding) start(c)
+    }
+
+    // ---- stop is debounced so a transient "not wanted" flip never tears the connection down
+    private var stopPending = false
+    private val stopRun = Runnable {
+        stopPending = false
+        val c = appCtx ?: return@Runnable
+        if (!(Engine.shellWanted(c) || recording) && SystemClock.elapsedRealtime() > grantUntil) {
+            stop("not needed (raw=${Engine.rawWanted(c)} recover=${Engine.recoverWanted(c)} recording=$recording)")
+        }
+    }
+
     /**
-     * What the helper should read: null = nothing, "" = recording (every EV_KEY device), otherwise only the
-     * recorded device's name. Real events are read only while the screen is on.
+     * What the helper should read: null = nothing, "" = every readable device (recording, or recorded device name
+     * unknown), otherwise the recorded device's name. Real events are read only while the screen is on.
      */
     private fun evdevTarget(c: Context): String? = when {
         recording -> ""
-        Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive -> recordedDevice(c)
+        Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive -> recordedDevice(c) ?: ""
         else -> null
     }
 
@@ -87,7 +109,7 @@ object RawInput {
         }
 
         override fun onInfo(msg: String) {
-            main.post { appCtx?.let { AppLog.add(it, "SYS", "watcher: $msg") } }
+            main.post { appCtx?.let { AppLog.add(it, if (msg.startsWith("ERR")) "ERR" else "HELP", msg.removePrefix("ERR ")) } }
         }
     }
 
@@ -98,6 +120,7 @@ object RawInput {
             val s = IUserService.Stub.asInterface(b)
             svc = s
             lastEvdev = null; lastCfg = ""
+            connectedAt = SystemClock.elapsedRealtime()
             try {
                 val evdev = evdevTarget(c)
                 s.start(callback, evdev != null, evdev ?: "")
@@ -106,16 +129,40 @@ object RawInput {
                 st(if (evdev != null) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
                 pushConfig(c, true)
                 if (wantGrant || !A11yGuard.canWrite(c)) { wantGrant = false; doGrant(s, c) }
-            } catch (e: Exception) {
-                st("start failed: ${e.message}", true)
+            } catch (e: Throwable) {
+                fail(c, "start failed", e)
             }
         }
 
         override fun onServiceDisconnected(n: ComponentName) {
             svc = null; binding = false; running = false
             lastEvdev = null; lastCfg = ""
-            st("service disconnected", true)
+            status = "service disconnected"
+            appCtx?.let { AppLog.add(it, "ERR", "shizuku: service disconnected") }
+            if (SystemClock.elapsedRealtime() - connectedAt > 10_000L) reconnectAttempt = 0
+            scheduleReconnect()
         }
+    }
+
+    /** Logs the exact exception, drops the connection and retries with backoff. */
+    private fun fail(c: Context, what: String, e: Throwable) {
+        AppLog.add(c, "ERR", "shizuku: $what: ${describeError(e)}")
+        status = "$what: ${e.javaClass.simpleName}: ${e.message}"
+        running = false
+        runCatching { Shizuku.unbindUserService(userArgs(c), conn, false) }
+        svc = null; binding = false
+        lastEvdev = null; lastCfg = ""
+        scheduleReconnect()
+    }
+
+    private fun scheduleReconnect() {
+        val c = appCtx ?: return
+        if (!wantUp || reconnectPending) return
+        val delay = minOf(60_000L, 1000L shl minOf(reconnectAttempt, 6))
+        reconnectAttempt++
+        reconnectPending = true
+        AppLog.add(c, "SYS", "shizuku: reconnecting in ${delay / 1000}s (attempt $reconnectAttempt)")
+        main.postDelayed(reconnectRun, delay)
     }
 
     /** Call once (Activity / AccessibilityService). Re-connects automatically if enabled. */
@@ -125,7 +172,7 @@ object RawInput {
         installed = true
         Shizuku.addBinderReceivedListenerSticky {
             val c = appCtx
-            if (c != null && Engine.shellWanted(c)) main.post { start(c) }
+            if (c != null && Engine.shellWanted(c)) main.post { reconnectAttempt = 0; start(c) }
         }
         Shizuku.addBinderDeadListener {
             main.post {
@@ -147,9 +194,10 @@ object RawInput {
         appCtx = c
         syncScreenReceiver(c)
         if (Engine.shellWanted(c) || recording) {
+            main.removeCallbacks(stopRun); stopPending = false
             if (running) pushAll(c) else start(c)
-        } else if ((running || binding || svc != null) && android.os.SystemClock.elapsedRealtime() > grantUntil) {
-            stop()
+        } else if ((running || binding || svc != null) && SystemClock.elapsedRealtime() > grantUntil) {
+            if (!stopPending) { stopPending = true; main.postDelayed(stopRun, 4000L) }
         }
     }
 
@@ -163,8 +211,8 @@ object RawInput {
                 st(if (evdev != null) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
             }
             pushConfig(c, false)
-        } catch (e: Exception) {
-            st("update failed: ${e.message}", true)
+        } catch (e: Throwable) {
+            fail(c, "update failed", e)
         }
     }
 
@@ -178,7 +226,8 @@ object RawInput {
         try {
             s.configure(A11yGuard.component(c), rec)
             lastCfg = sig
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            AppLog.add(c, "ERR", "shizuku: configure failed: ${describeError(e)}")
             st("configure failed: ${e.message}", true)
         }
     }
@@ -191,8 +240,9 @@ object RawInput {
 
     fun start(ctx: Context) {
         appCtx = ctx.applicationContext
+        wantUp = true
         if (running || binding) return
-        if (!Shizuku.pingBinder()) { st("Shizuku is not running. Start it first.", true); return }
+        if (!Shizuku.pingBinder()) { st("Shizuku is not running. Start it first.", true); scheduleReconnect(); return }
         if (Shizuku.isPreV11()) { st("Shizuku is too old – update it.", true); return }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
             st("waiting for Shizuku permission…")
@@ -222,22 +272,28 @@ object RawInput {
         st("connecting…")
         try {
             Shizuku.bindUserService(userArgs(ctx), conn)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             binding = false
-            st("bind failed: ${e.message}", true)
+            AppLog.add(ctx, "ERR", "shizuku: bind failed: ${describeError(e)}")
+            status = "bind failed: ${e.message}"
+            scheduleReconnect()
         }
     }
 
-    fun stop() {
+    fun stop(reason: String = "requested") {
         val c = appCtx
         val was = running || binding || svc != null
+        wantUp = false
+        reconnectAttempt = 0; reconnectPending = false
+        main.removeCallbacks(reconnectRun)
+        main.removeCallbacks(stopRun); stopPending = false
         runCatching { svc?.stop() }
         // remove = true also destroys the daemon (it restores the service first)
         if (c != null) runCatching { Shizuku.unbindUserService(userArgs(c), conn, true) }
         svc = null; running = false; binding = false
         lastEvdev = null; lastCfg = ""
         status = "Shizuku listener: off"
-        if (was) appCtx?.let { AppLog.add(it, "SYS", "shizuku: listener stopped") }
+        if (was) appCtx?.let { AppLog.add(it, "SYS", "shizuku: listener stopped ($reason)") }
     }
 
     // ------------------------------------------------------------ WRITE_SECURE_SETTINGS via Shizuku
@@ -245,7 +301,7 @@ object RawInput {
     fun grantSecure(ctx: Context) {
         val c = ctx.applicationContext
         appCtx = c
-        grantUntil = android.os.SystemClock.elapsedRealtime() + 15_000L // don't stop the helper mid-grant
+        grantUntil = SystemClock.elapsedRealtime() + 15_000L // don't stop the helper mid-grant
         val s = svc
         if (s == null) { wantGrant = true; start(c); return }
         doGrant(s, c)
@@ -253,11 +309,29 @@ object RawInput {
 
     private fun doGrant(s: IUserService, c: Context) {
         Thread {
-            val ok = runCatching { s.grantSecure(c.packageName) }.getOrDefault(false)
+            val ok = try {
+                s.grantSecure(c.packageName)
+            } catch (e: Throwable) {
+                AppLog.add(c, "ERR", "shizuku: grant failed: ${describeError(e)}")
+                false
+            }
+            // The permission usually shows up at once; give it a moment before reporting.
+            var effective = A11yGuard.canWrite(c)
+            var tries = 0
+            while (ok && !effective && tries < 10) {
+                try { Thread.sleep(200) } catch (_: Throwable) { }
+                effective = A11yGuard.canWrite(c)
+                tries++
+            }
             main.post {
-                AppLog.add(c, "SYS", "WRITE_SECURE_SETTINGS grant via Shizuku: ${if (ok) "ok" else "failed"}")
+                AppLog.add(
+                    c, "SYS",
+                    "WRITE_SECURE_SETTINGS grant via Shizuku: ${if (ok) "ok" else "failed"}" +
+                        if (ok && !effective) " (not visible to the app yet)" else ""
+                )
                 grantUntil = 0L
-                refresh(c)
+                A11yGuard.grantChanged() // UI re-reads the granted state right now
+                Engine.sync(c)
             }
         }.start()
     }
@@ -266,12 +340,14 @@ object RawInput {
     fun beginRecord(ctx: Context) {
         appCtx = ctx.applicationContext
         log.clear(); captured = null; lastA11yKey = null; recording = true
+        AppLog.add(appCtx!!, "SYS", "record: started (helper opens every readable input device)")
         TriggerService.refresh() // makes the service enable key filtering for the recording
         refresh(ctx)
     }
 
     fun endRecord() {
         recording = false
+        appCtx?.let { AppLog.add(it, "SYS", "record: ended") }
         TriggerService.refresh()
         appCtx?.let { refresh(it) }
     }
@@ -304,6 +380,7 @@ object RawInput {
     private fun handle(name: String, type: Int, code: Int, value: Int) {
         val ctx = appCtx ?: return
         val down = value == 1
+        AppLog.add(ctx, "KEY", "${if (down) "down" else "up"} $name · ${label(type, code)}")
         if (recording) {
             addLog("${if (down) "↓" else "↑"} $name · ${label(type, code)}")
             val ignore = type == 1 && (code == 114 || code == 115 || code == 116)

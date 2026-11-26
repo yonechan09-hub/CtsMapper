@@ -17,6 +17,9 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 
 /**
  * Keeps the accessibility service alive and makes it recoverable, and lets the user switch it off/on by hand.
@@ -30,6 +33,12 @@ import android.provider.Settings
 object A11yGuard {
     const val ACTION_WAKE = "com.example.ctsmapper.WAKE"
     private const val KEY = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+
+    /** Bumped when WRITE_SECURE_SETTINGS was just granted: UI that reads it recomposes and re-checks canWrite(). */
+    var grantVersion by mutableIntStateOf(0)
+        private set
+
+    fun grantChanged() { grantVersion++ }
 
     @Volatile private var expectUnbindUntil = 0L
     @Volatile private var lastRebind = 0L
