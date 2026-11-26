@@ -4,7 +4,9 @@ import com.example.ctsmapper.IKeyCallback;
 
 interface IUserService {
     void destroy() = 16777114; // required by Shizuku
-    void start(IKeyCallback cb, boolean evdev) = 1;
+    // evdev=false: no input reading. evdev=true: device="" (recording) opens only EV_KEY devices (no touch/sensor
+    // nodes); otherwise only the device with exactly that name.
+    void start(IKeyCallback cb, boolean evdev, String device) = 1;
     void stop() = 2;
     void configure(String component, boolean recover) = 3;
     boolean grantSecure(String pkg) = 4;

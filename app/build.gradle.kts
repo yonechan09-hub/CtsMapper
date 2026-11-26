@@ -15,6 +15,15 @@ android {
         versionCode = 1
         versionName = "0.1"
     }
+    signingConfigs {
+        // Fixed key committed to the repo so every CI debug APK is signed the same and updates in place.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildFeatures {
         compose = true
         aidl = true

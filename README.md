@@ -46,7 +46,7 @@ once from the Setup tab with Shizuku.
 
 ## Keeping it running
 
-- **Auto-recover:** if the accessibility service shows "Not working" or gets
+- **Auto-recover (off by default):** if the accessibility service shows "Not working" or gets
   killed, the app switches it off and on again to bring it back.
 - **Setup guide** with optional ColorOS steps that help stop the system from
   killing or freezing the app: battery set to Unrestricted, Auto-launch, lock

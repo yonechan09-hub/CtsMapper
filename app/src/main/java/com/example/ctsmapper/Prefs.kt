@@ -49,7 +49,7 @@ object Prefs {
     fun statusNotif(c: Context): Boolean = sp(c).getBoolean("status_notif", false)
     fun setStatusNotif(c: Context, v: Boolean) = sp(c).edit().putBoolean("status_notif", v).apply()
     /** Re-enable / rebind the accessibility service when it is dead ("Not working"). */
-    fun keepAlive(c: Context): Boolean = sp(c).getBoolean("keep_alive", true)
+    fun keepAlive(c: Context): Boolean = sp(c).getBoolean("keep_alive", false)
     fun setKeepAlive(c: Context, v: Boolean) = sp(c).edit().putBoolean("keep_alive", v).apply()
     /** Set when the user switched the service off themselves; auto-recover then stays quiet. */
     fun userOff(c: Context): Boolean = sp(c).getBoolean("user_off", false)

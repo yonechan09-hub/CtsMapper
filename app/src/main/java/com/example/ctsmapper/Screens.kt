@@ -154,10 +154,9 @@ fun GuideScreen() {
         }
 
         StepCard(
-            "Apps that won't run with an accessibility service on", if (canWrite) StepState.Done else StepState.Open,
-            "Start Shizuku, tap \"Grant via Shizuku\" on the main screen (one time). Then, right before opening such an app, " +
-                "switch the accessibility service off yourself with the switch on the main screen or the Quick Settings tile, " +
-                "and switch it back on when you're done."
+            "Switch the service from the app", if (canWrite) StepState.Done else StepState.Open,
+            "Start Shizuku and tap \"Grant via Shizuku\" on the main screen (one time). " +
+                "This lets the Quick Settings tile and auto-recover switch the accessibility service."
         ) {
             CtButton("Grant via Shizuku", { RawInput.grantSecure(ctx) }, enabled = !canWrite)
             CtText("Or: adb shell pm grant ${ctx.packageName} android.permission.WRITE_SECURE_SETTINGS", size = 14)

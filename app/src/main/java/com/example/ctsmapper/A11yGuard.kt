@@ -11,7 +11,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
@@ -113,7 +115,6 @@ object A11yGuard {
 
     fun onConnected(c: Context) {
         Prefs.setUserOff(c, false)
-        startGuard(c)
     }
 
     /** The service was unbound while the process stayed alive: decide if the user did it. */
@@ -125,8 +126,9 @@ object A11yGuard {
             if (!expected && !contains(app) && TriggerService.instance == null) {
                 Prefs.setUserOff(app, true)
                 AppLog.add(app, "SYS", "service was switched off by the user - auto-recover paused until it is switched on again")
-                RawInput.pushConfig(app)
             }
+            // The helper's recovery watcher only runs while the service is enabled: re-sync it.
+            Handler(Looper.getMainLooper()).post { Engine.sync(app) }
         }.start()
     }
 
@@ -174,11 +176,15 @@ object A11yGuard {
     }
 
     // ------------------------------------------------------------------ keep-alive plumbing
-    fun startGuard(c: Context) {
+    /**
+     * Starts the guard service so it can see the task being swiped away. Takes an Activity on purpose: it is only
+     * ever started while the app is in the foreground, never from a background callback.
+     */
+    fun startGuard(act: Activity) {
         try {
-            c.applicationContext.startService(Intent(c.applicationContext, GuardService::class.java))
+            act.startService(Intent(act.applicationContext, GuardService::class.java))
         } catch (e: Exception) {
-            AppLog.add(c, "SYS", "guard service not started: ${e.javaClass.simpleName}")
+            AppLog.add(act, "SYS", "guard service not started: ${e.javaClass.simpleName}")
         }
     }
 

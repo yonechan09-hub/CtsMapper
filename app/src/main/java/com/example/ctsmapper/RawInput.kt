@@ -25,15 +25,32 @@ object RawInput {
     private var svc: IUserService? = null
     private var binding = false
     private var installed = false
-    private var lastEvdev: Boolean? = null
+    private var lastEvdev: String? = null
     private var lastCfg = ""
     private var wantGrant = false
     @Volatile private var grantUntil = 0L
     private var screenRx: BroadcastReceiver? = null
 
-    /** evdev is read only while the screen is on (or while recording a key). */
-    private fun evdevNow(c: Context): Boolean =
-        recording || (Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive)
+    /**
+     * What the helper should read: null = nothing, "" = recording (every EV_KEY device), otherwise only the
+     * recorded device's name. Real events are read only while the screen is on.
+     */
+    private fun evdevTarget(c: Context): String? = when {
+        recording -> ""
+        Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive -> recordedDevice(c)
+        else -> null
+    }
+
+    /** Device name out of the recorded "evdev:<name>|<type>|<code>" signature. */
+    private fun recordedDevice(c: Context): String? {
+        val sig = Prefs.rawSig(c) ?: return null
+        if (!sig.startsWith("evdev:")) return null
+        val body = sig.removePrefix("evdev:")
+        val j = body.lastIndexOf('|')
+        if (j <= 0) return null
+        val i = body.lastIndexOf('|', j - 1)
+        return if (i > 0) body.substring(0, i) else null
+    }
 
     /** SCREEN_ON / SCREEN_OFF are push broadcasts: registered only while a Plus Key mapping is enabled. */
     private fun syncScreenReceiver(c: Context) {
@@ -82,11 +99,11 @@ object RawInput {
             svc = s
             lastEvdev = null; lastCfg = ""
             try {
-                val evdev = evdevNow(c)
-                s.start(callback, evdev)
+                val evdev = evdevTarget(c)
+                s.start(callback, evdev != null, evdev ?: "")
                 lastEvdev = evdev
                 running = true
-                st(if (evdev) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
+                st(if (evdev != null) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
                 pushConfig(c, true)
                 if (wantGrant || !A11yGuard.canWrite(c)) { wantGrant = false; doGrant(s, c) }
             } catch (e: Exception) {
@@ -122,7 +139,7 @@ object RawInput {
 
     private fun userArgs(ctx: Context) =
         Shizuku.UserServiceArgs(ComponentName(ctx.packageName, EventService::class.java.name))
-            .daemon(true).processNameSuffix("events").debuggable(false).version(2)
+            .daemon(true).processNameSuffix("events").debuggable(false).version(3)
 
     /** Start / stop / re-push settings so the Shizuku process matches what is currently wanted. */
     fun refresh(ctx: Context) {
@@ -138,12 +155,12 @@ object RawInput {
 
     private fun pushAll(c: Context) {
         val s = svc ?: return
-        val evdev = evdevNow(c)
+        val evdev = evdevTarget(c)
         try {
             if (lastEvdev != evdev) {
-                s.start(callback, evdev)
+                s.start(callback, evdev != null, evdev ?: "")
                 lastEvdev = evdev
-                st(if (evdev) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
+                st(if (evdev != null) "listening" else if (Engine.rawWanted(c)) "paused (screen off)" else "connected")
             }
             pushConfig(c, false)
         } catch (e: Exception) {

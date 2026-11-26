@@ -47,7 +47,8 @@ object Engine {
         Prefs.master(ctx) && Prefs.rawEnabled(ctx) && rawActionsSet(ctx) &&
             Prefs.rawSig(ctx)?.startsWith("evdev:") == true
 
-    fun recoverWanted(ctx: Context): Boolean = Prefs.keepAlive(ctx) && !Prefs.userOff(ctx)
+    /** Recovery watcher runs only while keep-alive is on and the accessibility service is enabled. */
+    fun recoverWanted(ctx: Context): Boolean = Prefs.keepAlive(ctx) && !Prefs.userOff(ctx) && a11yEnabled(ctx)
 
     /** The Shizuku process is needed for the Plus Key listener, or for dead-process recovery. */
     fun shellWanted(ctx: Context): Boolean = rawWanted(ctx) || recoverWanted(ctx)
