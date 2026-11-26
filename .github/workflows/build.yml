@@ -63,7 +63,7 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk CTS-Mapper.apk
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest CTS-Mapper.apk --title "CTS Mapper" --notes "Commit ${GITHUB_SHA::7}" --prerelease
+          gh release create latest CTS-Mapper.apk --title "CTS Mapper" --notes "Commit ${GITHUB_SHA::7}" --latest
 
       - name: Upload wrapper files
         if: always()
