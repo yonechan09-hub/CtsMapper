@@ -25,6 +25,27 @@ The Gemini overlay has three variants you can switch between, in case one
 doesn't work on your ROM. A Test button next to each trigger runs its action
 right away.
 
+## Plus Key (recorded key) listener
+
+The Plus Key can't be seen by normal apps, so CTS Mapper reads it through a
+small helper that Shizuku starts.
+
+- **Recording:** while the Record screen is open, the helper listens on every
+  readable input device, with no filtering. Press the key and it is recorded as
+  the device name plus the key code. Volume and power are ignored.
+- **Normal use:** the helper listens only on the device you recorded. If that
+  device can't be found or opened, it falls back to listening on all devices.
+- **Screen off:** it only runs while the screen is on, and only if a Plus Key
+  action is set.
+- **Failures are contained:** if one input device can't be opened or read, the
+  helper skips it and keeps going with the rest. Exceptions are caught and
+  written to the Log, never allowed to crash the helper.
+- **Auto-reconnect:** if the connection to Shizuku drops, the app reconnects on
+  its own, waiting 1 s, 2 s, 4 s and so on up to 60 s between tries. Turning the
+  listener off cancels the retries.
+- The app only observes the key. ColorOS' own Plus Key action still fires
+  unless you set it to nothing in system settings.
+
 ## Battery friendly
 
 - No polling and no wake locks.
@@ -32,6 +53,9 @@ right away.
   nothing needs them.
 - The Plus Key listener runs only while the screen is on, and only if a Plus
   Key action is set.
+- The recovery watcher is off by default, and when on it runs only while the
+  accessibility service is enabled. It checks the app process with `pidof` at
+  most once every 20 seconds.
 - There is no foreground service, and no notification unless you turn on the
   optional status notification.
 - A master switch turns everything off at once.
@@ -42,12 +66,18 @@ Add the **CTS Mapper** tile to your Quick Settings panel to switch the
 accessibility service on or off with one tap. This is useful for apps that
 refuse to run while an accessibility service is on. It only acts when you tap
 it, never on its own. The tile needs `WRITE_SECURE_SETTINGS`, which you grant
-once from the Setup tab with Shizuku.
+once with **Grant via Shizuku** (Setup tab or main screen). The granted state
+updates on screen right away, with no restart.
 
 ## Keeping it running
 
-- **Auto-recover (off by default):** if the accessibility service shows "Not working" or gets
-  killed, the app switches it off and on again to bring it back.
+- **Auto-recover (off by default):** if the accessibility service shows "Not
+  working" or gets killed, the app switches it off and on again to bring it
+  back. Turn it on in the Keep-alive card. It only acts while the service is
+  enabled, so it never turns on a service you switched off yourself.
+- **Live status:** the accessibility switch and status pill on the main screen
+  and in the Setup guide update as soon as the service is turned on or off,
+  from the app, the tile, or Android's settings.
 - **Setup guide** with optional ColorOS steps that help stop the system from
   killing or freezing the app: battery set to Unrestricted, Auto-launch, lock
   in recents, and the Google and Gemini apps. You may not need all of them. Try
@@ -64,8 +94,18 @@ Run an action from Tasker, a launcher shortcut, or ColorOS' own key settings:
 
 ## Log and diagnostics
 
-An in-app log shows the last events (triggers, actions, errors). A **Copy for
-support** button copies the log together with device and settings info.
+An in-app log shows the last 150 events, newest first. Besides triggers,
+actions and errors it shows:
+
+- **Helper** lines: which input devices were opened (and which failed, with the
+  reason), and when the helper falls back to all devices.
+- **Key** lines: every key press and release the helper sees, with the device
+  name.
+- **Error** lines: the exact exception (class, message, file and line) for any
+  failure in the app or the helper, and why the helper was stopped.
+
+A **Copy for support** button copies the log together with device and settings
+info.
 
 ## Requirements
 
@@ -86,8 +126,20 @@ support** button copies the log together with device and settings info.
 4. Follow the rest of the **Setup** tab.
 
 For the Plus Key: turn on the Shizuku listener, tap **Record trigger**, press
-the key, then pick actions for it. The app only observes the key, so ColorOS'
-own Plus Key action still fires unless you set it to nothing in system settings.
+the key, then pick actions for it.
+
+**Updates:** every build is signed with the same fixed key, so a new APK
+installs over the old one and keeps your settings. If you have an older build
+that was signed with a different key, uninstall it once first.
+
+## Troubleshooting the Plus Key
+
+- Open the Log after pressing the key. **Helper** lines show which devices were
+  opened. If none were, Shizuku isn't running or isn't allowed.
+- **Key** lines show what the helper sees. If your key never appears there, the
+  system doesn't hand it to apps on this phone.
+- If the key is seen but nothing runs, check that a press or long-press action
+  is set and that the recorded device name matches the one in the Key lines.
 
 ## Known issues
 
