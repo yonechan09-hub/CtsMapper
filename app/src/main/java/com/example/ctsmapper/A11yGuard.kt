@@ -239,6 +239,7 @@ class GuardService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         AppLog.add(this, "SYS", "task removed (swiped from Recents)")
+        AppLog.flush()
         if (Prefs.keepAlive(this)) A11yGuard.armWake(this, 2500L, 0)
         super.onTaskRemoved(rootIntent)
     }

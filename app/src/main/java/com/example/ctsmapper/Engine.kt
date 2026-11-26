@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import rikka.shizuku.Shizuku
 
 /** Central "should anything be running?" logic. Nothing here polls or holds a wakelock. */
 object Engine {
@@ -47,11 +48,17 @@ object Engine {
         Prefs.master(ctx) && Prefs.rawEnabled(ctx) && rawActionsSet(ctx) &&
             Prefs.rawSig(ctx)?.startsWith("evdev:") == true
 
-    /** Recovery watcher runs only while keep-alive is on and the accessibility service is enabled. */
+    /** Dead-process recovery is wanted only while keep-alive is on and the accessibility service is enabled. */
     fun recoverWanted(ctx: Context): Boolean = Prefs.keepAlive(ctx) && !Prefs.userOff(ctx) && a11yEnabled(ctx)
 
-    /** The Shizuku process is needed for the Plus Key listener, or for dead-process recovery. */
-    fun shellWanted(ctx: Context): Boolean = rawWanted(ctx) || recoverWanted(ctx)
+    fun shizukuRunning(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+
+    /**
+     * The Shizuku helper is kept alive only while a Plus Key mapping is enabled, or Auto-recover is on AND Shizuku is
+     * already running. Otherwise nothing is started and no reconnect timer exists (the sticky binder listener in
+     * RawInput starts it when Shizuku shows up).
+     */
+    fun shellWanted(ctx: Context): Boolean = rawWanted(ctx) || (recoverWanted(ctx) && shizukuRunning())
 
     /** Call after changing a toggle: starts/stops the optional pieces and refreshes the service. */
     fun sync(ctx: Context) {

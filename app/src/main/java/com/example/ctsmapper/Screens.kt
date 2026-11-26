@@ -246,6 +246,10 @@ private fun parseLog(line: String): LogEntry {
 @Composable
 fun LogScreen() {
     val ctx = LocalContext.current
+    DisposableEffect(Unit) {
+        AppLog.visible = true
+        onDispose { AppLog.visible = false }
+    }
     val ver = AppLog.version // read so the list refreshes when a line is added
     val lines = remember(ver) { AppLog.lines(ctx) }
     val entries = remember(lines) { lines.asReversed().map { parseLog(it) } }

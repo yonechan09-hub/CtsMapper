@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.os.IBinder
 import android.os.RemoteException
-import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
@@ -13,24 +12,33 @@ import java.io.File
 import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Locale
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Runs in a separate process with shell (adb) privileges, started by Shizuku as a DAEMON, so it keeps
  * working after the app process is swiped away / killed.
  *
- * 1. Optional: reads /dev/input/event* for the Plus Key: every readable node while recording, otherwise the recorded
- *    device (all nodes if it is not found). One thread blocks in poll() on the nodes plus a stop pipe.
- * 2. Optional recovery watcher (event driven, reads the system event log stream, no polling): if the app's
- *    own process has died while the accessibility service is still enabled ("Not working"), toggle it off
- *    and back on so Android rebinds it.
+ * 1. Optional: reads /dev/input/event* for the Plus Key: every readable node while recording (device == ""),
+ *    otherwise only the recorded device (if it is not found, nothing is opened and the helper stays idle).
+ *    One thread blocks in poll() on the nodes plus a stop pipe.
+ * 2. Optional dead-process recovery, purely event driven (no watcher, no polling): when the app's callback binder
+ *    dies, or when configure(recover = true) arrives, one debounced check runs in a single `sh -c`. If the app
+ *    process is gone while the accessibility service is still enabled ("Not working"), the service is toggled
+ *    off and back on so Android rebinds it.
  *
  * Must not touch app resources / Context (it runs outside the normal app environment).
  */
 class EventService() : IUserService.Stub() {
     @Suppress("UNUSED_PARAMETER")
     constructor(context: Context) : this()
+
+    private companion object {
+        const val DEATH_DEBOUNCE_MS = 1500L
+        const val CONFIG_DEBOUNCE_MS = 500L
+    }
 
     @Volatile private var gen = 0
     @Volatile private var cb: IKeyCallback? = null
@@ -41,6 +49,7 @@ class EventService() : IUserService.Stub() {
         // App process died: nothing is listening any more, so stop reading input right away.
         gen++
         stopSession()
+        scheduleRecovery(DEATH_DEBOUNCE_MS)
     }
 
     init {
@@ -61,11 +70,13 @@ class EventService() : IUserService.Stub() {
     private var component = ""
     private var appPkg = ""
     private var recover = false
-    private var lastCheck = 0L
 
-    @Volatile private var watchGen = 0
-    @Volatile private var logcat: Process? = null
-    private var watching = false
+    // One debounced recovery run: every trigger (binder death, configure) just re-arms this single timer.
+    private val recoveryExec: ScheduledThreadPoolExecutor by lazy {
+        ScheduledThreadPoolExecutor(1) { r -> Thread(r, "recovery").apply { isDaemon = true } }
+            .apply { removeOnCancelPolicy = true }
+    }
+    private var recoveryTask: ScheduledFuture<*>? = null
 
     @Synchronized
     private fun stopSession() {
@@ -87,7 +98,7 @@ class EventService() : IUserService.Stub() {
         gen++
         stopSession()
         runCatching { deathCb?.asBinder()?.unlinkToDeath(deathRecipient, 0) }
-        stopWatcher()
+        synchronized(lock) { recoveryTask?.cancel(false); recoveryTask = null }
         System.exit(0)
     }
 
@@ -109,7 +120,7 @@ class EventService() : IUserService.Stub() {
         }
     }
 
-    /** device == "": open every readable event node. Otherwise the node(s) with that name, else every node. */
+    /** device == "" (recording): open every readable event node. Otherwise only the node(s) with that name; if there are none, stay idle. */
     private fun openAndRead(cb: IKeyCallback, g: Int, device: String) {
         val nodes = (File("/dev/input").listFiles { f -> f.name.startsWith("event") } ?: emptyArray<File>())
             .sortedBy { it.name.removePrefix("event").toIntOrNull() ?: Int.MAX_VALUE }
@@ -142,8 +153,7 @@ class EventService() : IUserService.Stub() {
             mode = "recorded"
             openAll(labelled.filter { it.second == device || it.first.name == device })
             if (opened.isEmpty()) {
-                info("recorded device '$device' not found or not readable: opening all devices")
-                openAll(labelled)
+                info("recorded device '$device' not found or not readable: staying idle (record the key again)")
             }
         }
         if (failed.isNotEmpty()) infoChunks("open failed", failed.joinToString("; "))
@@ -284,7 +294,8 @@ class EventService() : IUserService.Stub() {
             this.appPkg = target?.packageName ?: ""
             this.recover = recover
         }
-        if (recover) ensureWatcher() else stopWatcher()
+        if (recover) scheduleRecovery(CONFIG_DEBOUNCE_MS)
+        else synchronized(lock) { recoveryTask?.cancel(false); recoveryTask = null }
     }
 
     override fun grantSecure(pkg: String): Boolean =
@@ -296,60 +307,6 @@ class EventService() : IUserService.Stub() {
         val list = readList()
         if (list.none { same(it, t) }) list.add(component)
         return sh("sh", "-c", listScript(list)).first == 0
-    }
-
-    // ------------------------------------------------------------------ dead-process recovery watcher
-    private val resumedRe = Regex("""wm_set_resumed_activity.*?\[\d+,([\w.]+)/""")
-    private val ignore = setOf(
-        "com.android.systemui", "com.android.permissioncontroller",
-        "com.google.android.permissioncontroller", "com.android.intentresolver"
-    )
-
-    private fun ensureWatcher() {
-        synchronized(lock) {
-            if (watching) return
-            watching = true
-            val g = ++watchGen
-            Thread { watchLoop(g) }.apply { isDaemon = true }.start()
-        }
-    }
-
-    private fun stopWatcher() {
-        synchronized(lock) {
-            watching = false
-            watchGen++
-            runCatching { logcat?.destroy() }
-            logcat = null
-        }
-    }
-
-    private fun watchLoop(g: Int) {
-        var first = true
-        while (g == watchGen) {
-            try {
-                val now = System.currentTimeMillis()
-                val since = String.format(Locale.US, "%d.%03d", now / 1000, now % 1000)
-                val p = ProcessBuilder(
-                    "logcat", "-b", "events", "-v", "brief", "-T", since,
-                    "wm_set_resumed_activity:I", "*:S"
-                ).redirectErrorStream(true).start()
-                logcat = p
-                if (first) {
-                    first = false
-                    info("recovery watcher started")
-                    recoverLocked()
-                }
-                p.inputStream.bufferedReader().forEachLine { line -> if (g == watchGen) handleLine(line) }
-            } catch (_: Throwable) { }
-            if (g != watchGen) return
-            try { Thread.sleep(3000) } catch (_: Throwable) { }
-        }
-    }
-
-    private fun handleLine(line: String) {
-        val r = resumedRe.find(line) ?: return
-        if (r.groupValues[1] in ignore) return
-        recoverLocked()
     }
 
     // ------------------------------------------------------------------ recovery
@@ -372,26 +329,51 @@ class EventService() : IUserService.Stub() {
                 "settings put secure accessibility_enabled 1"
         }
 
-    /** App process is gone but the service is still enabled/stuck: toggle it so the system rebinds it. */
-    private fun recoverLocked() {
-        val t: ComponentName
+    /** (Re)arms the single debounced recovery run: bursts of triggers collapse into one check. */
+    private fun scheduleRecovery(delayMs: Long) {
         synchronized(lock) {
             if (!recover || target == null) return
-            t = target!!
+            try {
+                recoveryTask?.cancel(false)
+                recoveryTask = recoveryExec.schedule(Runnable { recoverLocked() }, delayMs, TimeUnit.MILLISECONDS)
+            } catch (t: Throwable) {
+                info("ERR scheduleRecovery: ${describeError(t)}")
+            }
         }
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastCheck < 20_000) return // throttle: at most one process check per 20 s
-        lastCheck = now
-        val pid = sh("pidof", appPkg).first
-        if (pid != 1) return // 0 = alive; anything else (pidof missing / failed to run) = unknown, never toggle on a guess
-        val list = readList()
-        if (list.none { same(it, t) }) return // service not enabled: nothing to recover
-        sh("sh", "-c", listScript(list.filterNot { same(it, t) }))
-        try { Thread.sleep(400) } catch (_: Throwable) { }
-        val l2 = readList()
-        if (l2.none { same(it, t) }) l2.add(component)
-        sh("sh", "-c", listScript(l2))
-        info("app process was dead: accessibility service re-enabled")
+    }
+
+    private fun q(v: String) = "'" + v.replace("'", "'\\''") + "'"
+
+    /**
+     * App process is gone but the service is still enabled/stuck: toggle it so the system rebinds it.
+     * Check and toggle run in ONE `sh -c` (no pidof / settings get processes from Kotlin).
+     * Exit codes: 0 toggled, 10 app process alive or unknown (never toggle on a guess), 11 service not enabled.
+     */
+    private fun recoverLocked() {
+        val t: ComponentName
+        val pkg: String
+        synchronized(lock) {
+            if (!recover) return
+            t = target ?: return
+            pkg = appPkg
+        }
+        val flat = t.flattenToString()
+        val short = t.flattenToShortString()
+        val script = """
+            P=${q(pkg)}; F=${q(flat)}; S=${q(short)}
+            pidof "${'$'}P" >/dev/null 2>&1; [ ${'$'}? -eq 1 ] || exit 10
+            cur=${'$'}(settings get secure enabled_accessibility_services)
+            case ":${'$'}cur:" in *":${'$'}F:"*|*":${'$'}S:"*) ;; *) exit 11;; esac
+            set -f; n=; IFS=:
+            for e in ${'$'}cur; do [ "${'$'}e" = "${'$'}F" ] || [ "${'$'}e" = "${'$'}S" ] || n="${'$'}{n:+${'$'}n:}${'$'}e"; done
+            unset IFS
+            if [ -n "${'$'}n" ]; then settings put secure enabled_accessibility_services "${'$'}n"; else settings delete secure enabled_accessibility_services; fi
+            sleep 0.4
+            settings put secure enabled_accessibility_services "${'$'}cur"
+        """.trimIndent()
+        val r = sh("sh", "-c", script)
+        if (r.first == 0) info("app process was dead: accessibility service re-enabled")
+        else if (r.first != 10 && r.first != 11) info("ERR recovery script exit ${r.first}: ${r.second.take(120)}")
     }
 
     private fun info(msg: String) { runCatching { cb?.onInfo(msg) } }

@@ -31,8 +31,12 @@ object RawInput {
     private var wantGrant = false
     @Volatile private var grantUntil = 0L
     private var screenRx: BroadcastReceiver? = null
+    private var lastKeyLog = 0L
 
-    // ---- automatic reconnect with backoff (1s, 2s, 4s ... 60s) while the helper is wanted
+    // ---- reconnect with backoff (1s, 2s, 4s, 8s, 16s), at most MAX_RECONNECT attempts, only while Shizuku is running.
+    // When Shizuku is not running there is no timer at all: the sticky binder-received listener restarts things.
+    private const val MAX_RECONNECT = 5
+    private const val BIND_TIMEOUT_MS = 10_000L
     private var wantUp = false
     private var reconnectAttempt = 0
     private var reconnectPending = false
@@ -41,6 +45,18 @@ object RawInput {
         reconnectPending = false
         val c = appCtx ?: return@Runnable
         if (wantUp && (Engine.shellWanted(c) || recording) && !running && !binding) start(c)
+    }
+
+    // ---- a bind that never answers is abandoned after BIND_TIMEOUT_MS
+    private val bindTimeoutRun = Runnable {
+        if (!binding) return@Runnable
+        val c = appCtx ?: return@Runnable
+        binding = false
+        AppLog.add(c, "ERR", "shizuku: bind timed out after ${BIND_TIMEOUT_MS / 1000}s")
+        status = "bind timed out"
+        runCatching { Shizuku.unbindUserService(userArgs(c), conn, false) }
+        svc = null; running = false
+        scheduleReconnect()
     }
 
     // ---- stop is debounced so a transient "not wanted" flip never tears the connection down
@@ -54,12 +70,12 @@ object RawInput {
     }
 
     /**
-     * What the helper should read: null = nothing, "" = every readable device (recording, or recorded device name
-     * unknown), otherwise the recorded device's name. Real events are read only while the screen is on.
+     * What the helper should read: null = nothing, "" = every readable device (recording only), otherwise only the
+     * recorded device's name. Real events are read only while the screen is on.
      */
     private fun evdevTarget(c: Context): String? = when {
         recording -> ""
-        Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive -> recordedDevice(c) ?: ""
+        Engine.rawWanted(c) && c.getSystemService(PowerManager::class.java).isInteractive -> recordedDevice(c)
         else -> null
     }
 
@@ -116,6 +132,7 @@ object RawInput {
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(n: ComponentName, b: IBinder) {
             binding = false
+            main.removeCallbacks(bindTimeoutRun)
             val c = appCtx ?: return
             val s = IUserService.Stub.asInterface(b)
             svc = s
@@ -134,7 +151,12 @@ object RawInput {
             }
         }
 
+        override fun onBindingDied(n: ComponentName) = bindingLost("binding died")
+
+        override fun onNullBinding(n: ComponentName) = bindingLost("null binding")
+
         override fun onServiceDisconnected(n: ComponentName) {
+            main.removeCallbacks(bindTimeoutRun)
             svc = null; binding = false; running = false
             lastEvdev = null; lastCfg = ""
             status = "service disconnected"
@@ -144,8 +166,20 @@ object RawInput {
         }
     }
 
+    private fun bindingLost(what: String) {
+        main.removeCallbacks(bindTimeoutRun)
+        val c = appCtx ?: return
+        svc = null; binding = false; running = false
+        lastEvdev = null; lastCfg = ""
+        status = "shizuku: $what"
+        AppLog.add(c, "ERR", "shizuku: $what")
+        runCatching { Shizuku.unbindUserService(userArgs(c), conn, false) }
+        scheduleReconnect()
+    }
+
     /** Logs the exact exception, drops the connection and retries with backoff. */
     private fun fail(c: Context, what: String, e: Throwable) {
+        main.removeCallbacks(bindTimeoutRun)
         AppLog.add(c, "ERR", "shizuku: $what: ${describeError(e)}")
         status = "$what: ${e.javaClass.simpleName}: ${e.message}"
         running = false
@@ -158,7 +192,12 @@ object RawInput {
     private fun scheduleReconnect() {
         val c = appCtx ?: return
         if (!wantUp || reconnectPending) return
-        val delay = minOf(60_000L, 1000L shl minOf(reconnectAttempt, 6))
+        if (!Engine.shizukuRunning()) return // no timers while Shizuku is down: the sticky binder listener restarts us
+        if (reconnectAttempt >= MAX_RECONNECT) {
+            AppLog.add(c, "SYS", "shizuku: giving up after $MAX_RECONNECT reconnect attempts")
+            return
+        }
+        val delay = 1000L shl reconnectAttempt
         reconnectAttempt++
         reconnectPending = true
         AppLog.add(c, "SYS", "shizuku: reconnecting in ${delay / 1000}s (attempt $reconnectAttempt)")
@@ -177,6 +216,7 @@ object RawInput {
         Shizuku.addBinderDeadListener {
             main.post {
                 running = false; binding = false
+                main.removeCallbacks(reconnectRun); main.removeCallbacks(bindTimeoutRun); reconnectPending = false
                 st("Shizuku stopped – start it again", true)
                 // If it died while the service was hidden, put the service back.
                 appCtx?.let { A11yGuard.check(it, "shizuku stopped", 1000) }
@@ -186,7 +226,7 @@ object RawInput {
 
     private fun userArgs(ctx: Context) =
         Shizuku.UserServiceArgs(ComponentName(ctx.packageName, EventService::class.java.name))
-            .daemon(true).processNameSuffix("events").debuggable(false).version(3)
+            .daemon(true).processNameSuffix("events").debuggable(false).version(BuildConfig.VERSION_CODE)
 
     /** Start / stop / re-push settings so the Shizuku process matches what is currently wanted. */
     fun refresh(ctx: Context) {
@@ -242,7 +282,7 @@ object RawInput {
         appCtx = ctx.applicationContext
         wantUp = true
         if (running || binding) return
-        if (!Shizuku.pingBinder()) { st("Shizuku is not running. Start it first.", true); scheduleReconnect(); return }
+        if (!Shizuku.pingBinder()) { st("Shizuku is not running. Start it first.", true); return } // no retry timer: the sticky binder listener starts us when Shizuku appears
         if (Shizuku.isPreV11()) { st("Shizuku is too old – update it.", true); return }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
             st("waiting for Shizuku permission…")
@@ -270,9 +310,12 @@ object RawInput {
         if (binding || running) return
         binding = true
         st("connecting…")
+        main.removeCallbacks(bindTimeoutRun)
+        main.postDelayed(bindTimeoutRun, BIND_TIMEOUT_MS)
         try {
             Shizuku.bindUserService(userArgs(ctx), conn)
         } catch (e: Throwable) {
+            main.removeCallbacks(bindTimeoutRun)
             binding = false
             AppLog.add(ctx, "ERR", "shizuku: bind failed: ${describeError(e)}")
             status = "bind failed: ${e.message}"
@@ -285,7 +328,7 @@ object RawInput {
         val was = running || binding || svc != null
         wantUp = false
         reconnectAttempt = 0; reconnectPending = false
-        main.removeCallbacks(reconnectRun)
+        main.removeCallbacks(reconnectRun); main.removeCallbacks(bindTimeoutRun)
         main.removeCallbacks(stopRun); stopPending = false
         runCatching { svc?.stop() }
         // remove = true also destroys the daemon (it restores the service first)
@@ -380,7 +423,14 @@ object RawInput {
     private fun handle(name: String, type: Int, code: Int, value: Int) {
         val ctx = appCtx ?: return
         val down = value == 1
-        AppLog.add(ctx, "KEY", "${if (down) "down" else "up"} $name · ${label(type, code)}")
+        // Key lines only while recording, or for the recorded device; at most one per second.
+        if (recording || name == recordedDevice(ctx)) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastKeyLog >= 1000L) {
+                lastKeyLog = now
+                AppLog.add(ctx, "KEY", "${if (down) "down" else "up"} $name · ${label(type, code)}")
+            }
+        }
         if (recording) {
             addLog("${if (down) "↓" else "↑"} $name · ${label(type, code)}")
             val ignore = type == 1 && (code == 114 || code == 115 || code == 116)

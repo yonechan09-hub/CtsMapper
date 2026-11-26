@@ -55,6 +55,11 @@ class MainActivity : ComponentActivity() {
         A11yGuard.requestBatteryOnce(this)
         setContent { CtTheme { Root() } }
     }
+
+    override fun onStop() {
+        AppLog.flush()
+        super.onStop()
+    }
 }
 
 @Composable

@@ -12,7 +12,8 @@ android {
         applicationId = "com.example.ctsmapper"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
+        // CI bumps it on every run so Shizuku restarts the helper after each update (RawInput.userArgs uses it).
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionName = "0.1"
     }
     signingConfigs {
@@ -27,6 +28,7 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -34,15 +34,21 @@ small helper that Shizuku starts.
   readable input device, with no filtering. Press the key and it is recorded as
   the device name plus the key code. Volume and power are ignored.
 - **Normal use:** the helper listens only on the device you recorded. If that
-  device can't be found or opened, it falls back to listening on all devices.
+  device can't be found or opened, it logs that and stays idle (it never opens
+  all devices outside recording). Record the key again to fix it.
 - **Screen off:** it only runs while the screen is on, and only if a Plus Key
   action is set.
 - **Failures are contained:** if one input device can't be opened or read, the
   helper skips it and keeps going with the rest. Exceptions are caught and
   written to the Log, never allowed to crash the helper.
-- **Auto-reconnect:** if the connection to Shizuku drops, the app reconnects on
-  its own, waiting 1 s, 2 s, 4 s and so on up to 60 s between tries. Turning the
-  listener off cancels the retries.
+- **Auto-reconnect:** if the connection to the helper drops while Shizuku is
+  running, the app retries after 1 s, 2 s, 4 s, 8 s and 16 s, then gives up. A
+  bind that doesn't answer within 10 s counts as a failed attempt. When Shizuku
+  itself is not running there are no timers: the app waits for Shizuku to
+  announce itself and starts the helper then. Turning the listener off cancels
+  the retries.
+- **Helper lifetime:** it is kept only while a Plus Key mapping is enabled, or
+  while Auto-recover is on and Shizuku is already running.
 - The app only observes the key. ColorOS' own Plus Key action still fires
   unless you set it to nothing in system settings.
 
@@ -53,9 +59,10 @@ small helper that Shizuku starts.
   nothing needs them.
 - The Plus Key listener runs only while the screen is on, and only if a Plus
   Key action is set.
-- The recovery watcher is off by default, and when on it runs only while the
-  accessibility service is enabled. It checks the app process with `pidof` at
-  most once every 20 seconds.
+- Auto-recover is off by default. It is event driven: no watcher, no polling and
+  no process spawned on app switches. One debounced check runs when the app's
+  connection to the helper dies, or when the app sends the Auto-recover setting.
+  The check and the toggle run in a single shell call.
 - There is no foreground service, and no notification unless you turn on the
   optional status notification.
 - A master switch turns everything off at once.
@@ -99,8 +106,8 @@ actions and errors it shows:
 
 - **Helper** lines: which input devices were opened (and which failed, with the
   reason), and when the helper falls back to all devices.
-- **Key** lines: every key press and release the helper sees, with the device
-  name.
+- **Key** lines: key presses and releases from the recorded device (or any
+  device while recording), at most one per second.
 - **Error** lines: the exact exception (class, message, file and line) for any
   failure in the app or the helper, and why the helper was stopped.
 

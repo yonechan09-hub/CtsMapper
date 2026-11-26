@@ -19,6 +19,20 @@ object AppLog {
     private var crashHooked = false
     private val fmt = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     private val main = Handler(Looper.getMainLooper())
+    private const val FLUSH_MS = 4000L
+    private var appCtx: Context? = null
+    private var flushPending = false
+    private var uiPending = false
+
+    /** Set by the Log screen while it is on screen. UI refreshes are skipped otherwise. */
+    @Volatile var visible = false
+        set(v) {
+            field = v
+            if (v) main.post { version++ } // catch up once with whatever was added while hidden
+        }
+
+    private val flushRun = Runnable { flush() }
+    private val uiRun = Runnable { uiPending = false; if (visible) version++ }
 
     /** Read this in Compose to get recomposed when a line is added. */
     var version by mutableIntStateOf(0)
@@ -36,16 +50,35 @@ object AppLog {
 
     fun add(c: Context, kind: String, msg: String) = write(c, kind, msg, sync = false)
 
+    /** Writes the in-memory lines to SharedPreferences now (also called when the app goes to the background). */
+    fun flush() {
+        val c = appCtx ?: return
+        synchronized(lock) {
+            flushPending = false
+            if (!loaded) return
+            prefs(c).edit().putString("lines", items.joinToString("\n")).apply()
+        }
+    }
+
+    // Writes are debounced: the first add arms one flush FLUSH_MS later, further adds just join it.
     private fun write(c: Context, kind: String, msg: String, sync: Boolean) {
         val clean = msg.replace('\n', ' ').take(300)
+        var arm = false
         synchronized(lock) {
+            appCtx = c.applicationContext
             ensureLoaded(c)
             items.add("${fmt.format(Date())} ${kind.padEnd(4)} $clean")
             while (items.size > MAX) items.removeAt(0)
-            val e = prefs(c).edit().putString("lines", items.joinToString("\n"))
-            if (sync) e.commit() else e.apply()
+            if (sync) {
+                flushPending = false
+                prefs(c).edit().putString("lines", items.joinToString("\n")).commit()
+            } else if (!flushPending) {
+                flushPending = true
+                arm = true
+            }
         }
-        if (!sync) main.post { version++ }
+        if (arm) main.postDelayed(flushRun, FLUSH_MS)
+        if (!sync && visible && !uiPending) { uiPending = true; main.post(uiRun) }
     }
 
     fun lines(c: Context): List<String> = synchronized(lock) { ensureLoaded(c); items.toList() }
