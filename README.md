@@ -1,8 +1,25 @@
-# CTS Mapper
+<p align="center">
+  <img src="docs/images/logo.svg" width="128" alt="CTS Mapper logo">
+</p>
+
+<h1 align="center">CTS Mapper</h1>
 
 Run **Circle to Search** or **Gemini** from a gesture, a volume button, or a
 hardware key such as the ColorOS **Plus Key**. Made for ColorOS, but it should
 work on other Android 11+ phones too.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/home.png" width="30%" alt="Home screen">
+  <img src="docs/images/shortcuts.png" width="30%" alt="Shortcuts">
+  <img src="docs/images/gemini-strip.png" width="30%" alt="Gemini overlay variant and bottom-edge strip">
+</p>
+<p align="center">
+  <img src="docs/images/recorded-key.png" width="30%" alt="Recorded key (Plus Key)">
+  <img src="docs/images/log.png" width="30%" alt="Log screen">
+  <img src="docs/images/setup.png" width="30%" alt="Setup guide">
+</p>
 
 ## Triggers
 
